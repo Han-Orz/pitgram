@@ -3,6 +3,7 @@ import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { InlineButtonRegistry } from "./inline-buttons.js";
+import { NativeControlRegistry, type NativeControlBinding } from "./native-controls.js";
 import { readInlineView, type InlineView, type InlineViewButton } from "./inline-view.js";
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
@@ -224,7 +225,7 @@ interface TelegramUpdate {
 interface TelegramCallbackQuery {
 	id: string;
 	from: TelegramUser;
-	message?: { message_id: number; chat: TelegramChat; date?: number };
+	message?: { message_id: number; chat: TelegramChat; date?: number; from?: TelegramUser };
 	data?: string;
 }
 
@@ -532,6 +533,9 @@ export default function (pi: ExtensionAPI) {
 	let queuedTelegramTurns: PendingTelegramTurn[] = [];
 	let durableQueue: DurableQueue<TelegramUpdate> | undefined;
 	let inlineButtonRegistry: InlineButtonRegistry | undefined;
+	let nativeControlRegistry: NativeControlRegistry | undefined;
+	let nativeControlInProgress = false;
+	const nativeMenuMessages = new Map<string, number>();
 	let durableBotIdentity: string | undefined;
 	const durableMessageTasks = new Set<Promise<void>>();
 	const pendingControlTasks = new Set<Promise<void>>();
@@ -702,7 +706,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function dispatchNextTelegramTurn(ctx: ExtensionContext): void {
-		if (shuttingDown || activeTelegramTurn || dispatchedTelegramTurn || preserveQueuedTurnsAsHistory || pendingControlTasks.size || deferredControlTimers.size || !ctx.isIdle()) return;
+		if (shuttingDown || activeTelegramTurn || dispatchedTelegramTurn || nativeControlInProgress || preserveQueuedTurnsAsHistory || pendingControlTasks.size || deferredControlTimers.size || !ctx.isIdle()) return;
 		const turn = queuedTelegramTurns[0];
 		if (!turn) return;
 		if (turn.source.callback && turn.source.originCwd !== (ctx.cwd || process.cwd())) {
@@ -1242,6 +1246,9 @@ export default function (pi: ExtensionAPI) {
 		durableQueue = undefined;
 		durableBotIdentity = undefined;
 		inlineButtonRegistry = undefined;
+		nativeControlRegistry = undefined;
+		nativeMenuMessages.clear();
+		nativeControlInProgress = false;
 		ingestedUpdateIds.clear();
 		await queue?.close();
 	}
@@ -1672,6 +1679,10 @@ export default function (pi: ExtensionAPI) {
 		if (lower.startsWith("/model")) {
 			const arg = rawText.slice(6).trim();
 			if (!arg) {
+				if (!config.relayEnabled && pollingPromise && nativeControlRegistry) {
+					await showNativeModelMenu(firstMessage.chat.id, ctx.cwd || process.cwd(), ctx);
+					return;
+				}
 				try {
 					const models = await getConfiguredModels(ctx);
 					const current = ctx.model;
@@ -1712,12 +1723,25 @@ export default function (pi: ExtensionAPI) {
 						return;
 					}
 
-					await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Switching model to ${targetModel.provider}/${targetModel.id}...`);
-					const success = await pi.setModel(targetModel);
-					if (success) {
-						await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Successfully switched model to ${targetModel.provider}/${targetModel.id}`);
-					} else {
-						await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Failed to switch model: No API key or authorization found for ${targetModel.provider}`);
+					if (isPiBusyForSettings(ctx)) {
+						await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Cannot switch models while pi is busy. Send \"stop\" first.");
+						return;
+					}
+					nativeControlInProgress = true;
+					try {
+						await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Switching model to ${targetModel.provider}/${targetModel.id}...`);
+						if (!ctx.isIdle()) {
+							await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Pi became busy; model was not changed.");
+							return;
+						}
+						const success = await pi.setModel(targetModel);
+						if (success) {
+							await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Successfully switched model to ${targetModel.provider}/${targetModel.id}`);
+						} else {
+							await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Failed to switch model: No API key or authorization found for ${targetModel.provider}`);
+						}
+					} finally {
+						nativeControlInProgress = false;
 					}
 				} catch (error) {
 					const msg = error instanceof Error ? error.message : String(error);
@@ -1731,6 +1755,10 @@ export default function (pi: ExtensionAPI) {
 			const arg = rawText.slice(9).trim().toLowerCase();
 			const validLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 			if (!arg) {
+				if (!config.relayEnabled && pollingPromise && nativeControlRegistry) {
+					await showNativeThinkingMenu(firstMessage.chat.id, ctx.cwd || process.cwd(), ctx);
+					return;
+				}
 				try {
 					const current = pi.getThinkingLevel();
 					await sendTextReply(
@@ -1751,12 +1779,23 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
+				if (isPiBusyForSettings(ctx)) {
+					await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Cannot change thinking level while pi is busy. Send \"stop\" first.");
+					return;
+				}
 				try {
+					nativeControlInProgress = true;
+					if (!ctx.isIdle()) {
+						await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Pi became busy; thinking level was not changed.");
+						return;
+					}
 					pi.setThinkingLevel(arg as any);
 					await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Thinking level set to: ${arg}`);
 				} catch (error) {
 					const msg = error instanceof Error ? error.message : String(error);
 					await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Failed to set thinking level: ${msg}`);
+				} finally {
+					nativeControlInProgress = false;
 				}
 			}
 			return;
@@ -1890,6 +1929,148 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function isPiBusyForSettings(ctx: ExtensionContext): boolean {
+		return !ctx.isIdle() || !!activeTelegramTurn || !!dispatchedTelegramTurn || queuedTelegramTurns.length > 0 || nativeControlInProgress;
+	}
+
+	function getSupportedThinkingLevels(ctx: ExtensionContext): string[] {
+		const model = ctx.model as any;
+		if (!model?.reasoning) return ["off"];
+		const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+		return levels.filter(level => level === "off" || model.thinkingLevelMap?.[level] !== null);
+	}
+
+	async function renderNativeMenu(chatId: number, originCwd: string, ctx: ExtensionContext, kind: "model" | "thinking"): Promise<void> {
+		if (!nativeControlRegistry || !config.botToken || config.allowedUserId === undefined) return;
+		originCwd = await realpath(originCwd);
+		const key = `${chatId}:${kind}`;
+		const existingId = nativeMenuMessages.get(key);
+		if (existingId !== undefined) {
+			await renderNativeMenuWithMessage(chatId, originCwd, ctx, kind, 0, existingId);
+			return;
+		}
+		const sent = await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: "Loading controls…" });
+		nativeMenuMessages.set(key, sent.message_id);
+		await renderNativeMenuWithMessage(chatId, originCwd, ctx, kind, 0, sent.message_id);
+	}
+
+	async function renderNativeMenuWithMessage(chatId: number, originCwd: string, ctx: ExtensionContext, kind: "model" | "thinking", page: number, messageId: number): Promise<void> {
+		if (!nativeControlRegistry || !config.botToken || config.allowedUserId === undefined) return;
+		const botId = config.botId ?? Number(config.botToken.split(":", 1)[0]);
+		const binding: NativeControlBinding = { botId, userId: config.allowedUserId, chatId, messageId, originCwd };
+		nativeControlRegistry.invalidateMessage(binding);
+		const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+		let text: string;
+		if (kind === "model") {
+			const models = await getConfiguredModels(ctx);
+			modelCache = models;
+			const pageSize = 8;
+			const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
+			page = Math.max(0, Math.min(pageCount - 1, page));
+			text = models.length ? `Select model (${page + 1}/${pageCount})` : "No configured available models.";
+			for (const model of models.slice(page * pageSize, (page + 1) * pageSize)) {
+				const active = ctx.model?.provider === model.provider && ctx.model?.id === model.id;
+				buttons.push([{ text: `${active ? "✓ " : ""}${model.provider}/${model.id}`.slice(0, 64), callback_data: nativeControlRegistry.issue({ kind: "model", provider: model.provider, modelId: model.id, page }, binding) }]);
+			}
+			if (pageCount > 1) {
+				const nav: Array<{ text: string; callback_data: string }> = [];
+				if (page > 0) nav.push({ text: "‹", callback_data: nativeControlRegistry.issue({ kind: "model-page", page: page - 1 }, binding) });
+				if (page + 1 < pageCount) nav.push({ text: "›", callback_data: nativeControlRegistry.issue({ kind: "model-page", page: page + 1 }, binding) });
+				buttons.push(nav);
+			}
+		} else {
+			const levels = getSupportedThinkingLevels(ctx);
+			text = `Select thinking level (current: ${pi.getThinkingLevel()})`;
+			for (const level of levels) buttons.push([{ text: `${level === pi.getThinkingLevel() ? "✓ " : ""}${level}`, callback_data: nativeControlRegistry.issue({ kind: "thinking", level }, binding) }]);
+		}
+		await callTelegram("editMessageText", { chat_id: chatId, message_id: messageId, text,
+			...(buttons.length ? { reply_markup: { inline_keyboard: buttons } } : { reply_markup: { inline_keyboard: [] } }) });
+	}
+
+	async function showNativeModelMenu(chatId: number, cwd: string, ctx: ExtensionContext): Promise<void> {
+		await renderNativeMenu(chatId, cwd, ctx, "model");
+	}
+
+	async function showNativeThinkingMenu(chatId: number, cwd: string, ctx: ExtensionContext): Promise<void> {
+		await renderNativeMenu(chatId, cwd, ctx, "thinking");
+	}
+
+	async function handleNativeControlCallback(query: TelegramCallbackQuery, updateId: number, ctx: ExtensionContext): Promise<void> {
+		const message = query.message;
+		const user = query.from;
+		const botId = config.botToken ? (config.botId ?? Number(config.botToken.split(":", 1)[0])) : 0;
+		const rawCwd = ctx.cwd || process.cwd();
+		const currentCwd = await realpath(rawCwd).catch(() => "");
+		const valid = Boolean(message && message.chat.type === "private" && message.from?.is_bot === true && message.from.id === botId && user && !user.is_bot
+			&& user.id === config.allowedUserId && message.chat.id === user.id
+			&& /^[A-Za-z0-9_-]{1,256}$/.test(query.id) && typeof query.data === "string"
+			&& /^pc:[a-f0-9]{32}$/.test(query.data) && nativeControlRegistry
+			&& !config.relayEnabled && !!pollingPromise && !!pollingController && !pollingController.signal.aborted
+			&& Number.isSafeInteger(botId) && durableBotIdentity === String(botId));
+		if (!valid || !message || !user || !query.data) {
+			await acknowledgeCallback(query.id, "This control is unavailable.");
+			await durableQueue!.complete([updateId]);
+			return;
+		}
+		const menuKind: "model" | "thinking" | undefined = ["model", "thinking"].find(kind => nativeMenuMessages.get(`${message.chat.id}:${kind}`) === message.message_id) as any;
+		if (!menuKind || !await realpath(currentCwd).then(path => path === currentCwd).catch(() => false)) {
+			await acknowledgeCallback(query.id, "This control expired or belongs to another workspace.");
+			await durableQueue!.complete([updateId]);
+			return;
+		}
+		const action = nativeControlRegistry!.consume(query.data, { botId, userId: user.id, chatId: message.chat.id, messageId: message.message_id, originCwd: currentCwd });
+		if (!action) {
+			await acknowledgeCallback(query.id, "This control expired or was already used.");
+			await durableQueue!.complete([updateId]);
+			return;
+		}
+		let callbackAnswered = false;
+		const answer = async (text?: string): Promise<void> => {
+			if (callbackAnswered) return;
+			callbackAnswered = true;
+			await acknowledgeCallback(query.id, text);
+		};
+		const expectedMenuKind = action.kind === "thinking" ? "thinking" : "model";
+		if (menuKind !== expectedMenuKind) {
+			await answer("This control does not match its menu.");
+			await durableQueue!.complete([updateId]);
+			return;
+		}
+		try {
+			if (action.kind !== "model-page" && isPiBusyForSettings(ctx)) {
+				await answer("Pi is busy; no setting was changed.");
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, menuKind, action.kind === "model" ? action.page ?? 0 : 0, message.message_id);
+				await durableQueue!.complete([updateId]);
+				return;
+			}
+			if (action.kind === "model-page") {
+				await answer();
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "model", action.page, message.message_id);
+			} else if (action.kind === "model") {
+				nativeControlInProgress = true;
+				const model = (await getConfiguredModels(ctx)).find(item => item.provider === action.provider && item.id === action.modelId);
+				if (!model) throw new Error("That model is no longer configured.");
+				if (!ctx.isIdle() || activeTelegramTurn || dispatchedTelegramTurn || queuedTelegramTurns.length) throw new Error("Pi became busy; no setting was changed.");
+				if (!await pi.setModel(model)) throw new Error("Model switch was rejected (check provider authorization).");
+				await answer(`Model: ${model.provider}/${model.id}`);
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "model", action.page ?? 0, message.message_id);
+			} else {
+				nativeControlInProgress = true;
+				if (!getSupportedThinkingLevels(ctx).includes(action.level)) throw new Error("That thinking level is not supported by the current model.");
+				pi.setThinkingLevel(action.level as any);
+				await answer(`Thinking: ${action.level}`);
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "thinking", 0, message.message_id);
+			}
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			await answer(detail.slice(0, 200));
+			await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, menuKind, action.kind === "model" ? action.page ?? 0 : 0, message.message_id).catch(() => undefined);
+		} finally {
+			nativeControlInProgress = false;
+		}
+		await durableQueue!.complete([updateId]);
+	}
+
 	async function handleAuthorizedTelegramCallback(query: TelegramCallbackQuery, updateId: number, ctx: ExtensionContext): Promise<void> {
 		const message = query.message;
 		const user = query.from;
@@ -1897,14 +2078,22 @@ export default function (pi: ExtensionAPI) {
 			|| config.allowedUserId === undefined || user.id !== config.allowedUserId
 			|| message.chat.id !== user.id
 			|| !/^[A-Za-z0-9_-]{1,256}$/.test(query.id)
-			|| typeof query.data !== "string" || !/^pg:[a-f0-9]{32}$/.test(query.data)
-			|| !inlineButtonRegistry;
+			|| typeof query.data !== "string";
 		if (invalid) {
 			await acknowledgeCallback(query.id, "This button is unavailable.");
 			await durableQueue!.complete([updateId]);
 			return;
 		}
 
+		if (query.data!.startsWith("pc:")) {
+			await handleNativeControlCallback(query, updateId, ctx);
+			return;
+		}
+		if (!/^pg:[a-f0-9]{32}$/.test(query.data!) || !inlineButtonRegistry) {
+			await acknowledgeCallback(query.id, "This button is unavailable.");
+			await durableQueue!.complete([updateId]);
+			return;
+		}
 		const [prefix, grantId] = query.data!.split(":");
 		const grant = prefix === "pg" ? await inlineButtonRegistry!.get(grantId) : undefined;
 		if (!grant || grant.userId !== user.id || grant.chatId !== message!.chat.id
@@ -2072,6 +2261,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				durableQueue = queue;
 				inlineButtonRegistry = buttons;
+				nativeControlRegistry = new NativeControlRegistry();
 				durableBotIdentity = identity;
 			}
 			if (shuttingDown) {
