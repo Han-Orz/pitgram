@@ -282,7 +282,7 @@ interface PendingTelegramTurn {
 
 interface DeferredTelegramControl {
 	kind: "deferred-control";
-	run(): Promise<void>;
+	run(onSessionTransition?: () => void): Promise<void>;
 }
 
 type ActiveTelegramTurn = PendingTelegramTurn;
@@ -534,6 +534,7 @@ export default function (pi: ExtensionAPI) {
 	let durableBotIdentity: string | undefined;
 	const durableMessageTasks = new Set<Promise<void>>();
 	const pendingControlTasks = new Set<Promise<void>>();
+	const pendingSessionTransitionUpdateIds = new Set<number>();
 	const deferredControlTimers = new Map<ReturnType<typeof setTimeout>, () => void>();
 	const ingestedUpdateIds = new Set<number>();
 	let shuttingDown = false;
@@ -1443,7 +1444,7 @@ export default function (pi: ExtensionAPI) {
 			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Starting a new session${name ? ` "${name}"` : ""}...`);
 			return {
 				kind: "deferred-control",
-				run: () => deferControlToNextTick(async () => {
+				run: (onSessionTransition) => deferControlToNextTick(async () => {
 				try {
 					if (shuttingDown) return;
 					await ensureRunnersPatched();
@@ -1453,6 +1454,7 @@ export default function (pi: ExtensionAPI) {
 						const diag = `activeRunner=${!!activeRunner}, keys=${Object.keys(cmdCtx).join(",")}`;
 						throw new Error(`cmdCtx.newSession is not a function in current context (${diag})`);
 					}
+					onSessionTransition?.();
 					const result = await cmdCtx.newSession({
 						setup: async (sm: any) => {
 							if (name) {
@@ -1491,7 +1493,7 @@ export default function (pi: ExtensionAPI) {
 			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Switching to session: ${targetPath}...`);
 			return {
 				kind: "deferred-control",
-				run: () => deferControlToNextTick(async () => {
+				run: (onSessionTransition) => deferControlToNextTick(async () => {
 				try {
 					if (shuttingDown) return;
 					await ensureRunnersPatched();
@@ -1501,6 +1503,7 @@ export default function (pi: ExtensionAPI) {
 						const diag = `activeRunner=${!!activeRunner}, keys=${Object.keys(cmdCtx).join(",")}`;
 						throw new Error(`cmdCtx.switchSession is not a function in current context (${diag})`);
 					}
+					onSessionTransition?.();
 					const result = await cmdCtx.switchSession(targetPath, {
 						withSession: async (newCtx: any) => {
 							if (shuttingDown) return;
@@ -1530,7 +1533,7 @@ export default function (pi: ExtensionAPI) {
 			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Forking current session...");
 			return {
 				kind: "deferred-control",
-				run: () => deferControlToNextTick(async () => {
+				run: (onSessionTransition) => deferControlToNextTick(async () => {
 				try {
 					if (shuttingDown) return;
 					await ensureRunnersPatched();
@@ -1540,6 +1543,7 @@ export default function (pi: ExtensionAPI) {
 						const diag = `activeRunner=${!!activeRunner}, keys=${Object.keys(cmdCtx).join(",")}`;
 						throw new Error(`cmdCtx.fork is not a function in current context (${diag})`);
 					}
+					onSessionTransition?.();
 					const result = await cmdCtx.fork(leafId, {
 						position: "at",
 						withSession: async (newCtx: any) => {
@@ -1668,7 +1672,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (lower.startsWith("/thinking")) {
 			const arg = rawText.slice(9).trim().toLowerCase();
-			const validLevels = ["off", "minimal", "low", "medium", "high", "xhigh"];
+			const validLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 			if (!arg) {
 				try {
 					const current = pi.getThinkingLevel();
@@ -1753,12 +1757,16 @@ export default function (pi: ExtensionAPI) {
 				const queue = durableQueue!;
 				const turn = await dispatchAuthorizedTelegramMessages(messages, ctx, updateIds);
 				if (turn && "kind" in turn && turn.kind === "deferred-control") {
+					let sessionTransitionStarted = false;
 					let controlTask!: Promise<void>;
 					controlTask = (async () => {
 						try {
 							await queue.running(updateIds);
 							if (shuttingDown || durableQueue !== queue) return;
-							await turn.run();
+							await turn.run(() => {
+								sessionTransitionStarted = true;
+								for (const id of updateIds) pendingSessionTransitionUpdateIds.add(id);
+							});
 							if (!shuttingDown && durableQueue === queue) await queue.complete(updateIds);
 						} catch {
 							if (!shuttingDown && durableQueue === queue) {
@@ -1766,6 +1774,9 @@ export default function (pi: ExtensionAPI) {
 								updateStatus(ctx, "Telegram control failed and was retained; use /pitgram-retry.");
 							}
 						} finally {
+							if (sessionTransitionStarted) {
+								for (const id of updateIds) pendingSessionTransitionUpdateIds.delete(id);
+							}
 							pendingControlTasks.delete(controlTask);
 							if (!shuttingDown && pendingControlTasks.size === 0 && deferredControlTimers.size === 0 && queuedTelegramTurns.length > 0 && dispatchTimer === undefined) {
 								dispatchTimer = setTimeout(() => {
@@ -2446,6 +2457,11 @@ export default function (pi: ExtensionAPI) {
 		}
 		mediaGroups.clear();
 		await Promise.allSettled([...durableMessageTasks]);
+		const transitionUpdateIds = [...pendingSessionTransitionUpdateIds];
+		if (durableQueue && transitionUpdateIds.length) {
+			await durableQueue.complete(transitionUpdateIds);
+			for (const id of transitionUpdateIds) pendingSessionTransitionUpdateIds.delete(id);
+		}
 		if (activeTelegramTurn) {
 			await clearPreview(activeTelegramTurn.chatId);
 		}

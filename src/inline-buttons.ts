@@ -164,8 +164,10 @@ export class InlineButtonRegistry {
 					await file.sync();
 				} finally { await file.close(); }
 				await rename(temporary, this.path);
-				const directory = await open(dirname(this.path), "r");
-				try { await directory.sync(); } finally { await directory.close(); }
+				if (process.platform !== "win32") {
+					const directory = await open(dirname(this.path), "r");
+					try { await directory.sync(); } finally { await directory.close(); }
+				}
 				this.grants = next;
 			} finally { await unlink(temporary).catch(() => undefined); }
 		});
