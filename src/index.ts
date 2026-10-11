@@ -3,7 +3,7 @@ import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { InlineButtonRegistry } from "./inline-buttons.js";
-import { NativeControlRegistry, type NativeControlBinding } from "./native-controls.js";
+import { NativeControlRegistry, type NativeControlBinding, type NativeModelMenuScope } from "./native-controls.js";
 import { readInlineView, type InlineView, type InlineViewButton } from "./inline-view.js";
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
@@ -363,7 +363,8 @@ Telegram bridge extension is active.
 - Messages forwarded from Telegram are prefixed with "[telegram]".
 - [telegram] messages may include local temp file paths for Telegram attachments. Read those files as needed.
 - If a [telegram] user asked for a file or generated artifact, use the pitgram_attach tool with the local file path so the extension can send it with your next final reply.
-- Do not assume mentioning a local file path in plain text will send it to Telegram. Use pitgram_attach.`;
+- Do not assume mentioning a local file path in plain text will send it to Telegram. Use pitgram_attach.
+- When explicitly asked to change Pi's common model scope, resolve names to exact provider/model IDs from Pi's current catalog and ask if ambiguous. Use existing Pi file tools to edit only enabledModels in the configured global agent settings.json (normally ~/.pi/agent/settings.json), preserving every other field. Never edit models.json, project-local settings, or startup arguments; explain that project/CLI overrides and an already-running scope take precedence. A file-only edit does not change the live scope; Pi's /scoped-models applies it at runtime.`;
 
 export function isTelegramPrompt(prompt: string): boolean {
 	return prompt.trimStart().startsWith(TELEGRAM_PREFIX);
@@ -1940,6 +1941,16 @@ export default function (pi: ExtensionAPI) {
 		return levels.filter(level => level === "off" || model.thinkingLevelMap?.[level] !== null);
 	}
 
+	function resolveNativeModelScope(ctx: ExtensionContext, requested?: NativeModelMenuScope): NativeModelMenuScope {
+		const hasScopedModels = ctx.scopedModels.length > 0;
+		if (requested === "all") return "all";
+		return hasScopedModels ? "scoped" : "all";
+	}
+
+	async function getNativeMenuModels(ctx: ExtensionContext, scope: NativeModelMenuScope): Promise<any[]> {
+		return scope === "scoped" ? ctx.scopedModels.map(scoped => scoped.model) : getConfiguredModels(ctx);
+	}
+
 	async function renderNativeMenu(chatId: number, originCwd: string, ctx: ExtensionContext, kind: "model" | "thinking"): Promise<void> {
 		if (!nativeControlRegistry || !config.botToken || config.allowedUserId === undefined) return;
 		originCwd = await realpath(originCwd);
@@ -1954,7 +1965,7 @@ export default function (pi: ExtensionAPI) {
 		await renderNativeMenuWithMessage(chatId, originCwd, ctx, kind, 0, sent.message_id);
 	}
 
-	async function renderNativeMenuWithMessage(chatId: number, originCwd: string, ctx: ExtensionContext, kind: "model" | "thinking", page: number, messageId: number): Promise<void> {
+	async function renderNativeMenuWithMessage(chatId: number, originCwd: string, ctx: ExtensionContext, kind: "model" | "thinking", page: number, messageId: number, requestedScope?: NativeModelMenuScope): Promise<void> {
 		if (!nativeControlRegistry || !config.botToken || config.allowedUserId === undefined) return;
 		const botId = config.botId ?? Number(config.botToken.split(":", 1)[0]);
 		const binding: NativeControlBinding = { botId, userId: config.allowedUserId, chatId, messageId, originCwd };
@@ -1962,21 +1973,27 @@ export default function (pi: ExtensionAPI) {
 		const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
 		let text: string;
 		if (kind === "model") {
-			const models = await getConfiguredModels(ctx);
-			modelCache = models;
+			const scope = resolveNativeModelScope(ctx, requestedScope);
+			const hasScopedModels = ctx.scopedModels.length > 0;
+			const models = await getNativeMenuModels(ctx, scope);
+			if (scope === "all") modelCache = models;
 			const pageSize = 8;
 			const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
 			page = Math.max(0, Math.min(pageCount - 1, page));
-			text = models.length ? `Select model (${page + 1}/${pageCount})` : "No configured available models.";
+			text = models.length ? `${scope === "scoped" ? "Select common model" : "Select model"} (${page + 1}/${pageCount})` : "No configured available models.";
 			for (const model of models.slice(page * pageSize, (page + 1) * pageSize)) {
 				const active = ctx.model?.provider === model.provider && ctx.model?.id === model.id;
-				buttons.push([{ text: `${active ? "✓ " : ""}${model.provider}/${model.id}`.slice(0, 64), callback_data: nativeControlRegistry.issue({ kind: "model", provider: model.provider, modelId: model.id, page }, binding) }]);
+				buttons.push([{ text: `${active ? "✓ " : ""}${model.provider}/${model.id}`.slice(0, 64), callback_data: nativeControlRegistry.issue({ kind: "model", provider: model.provider, modelId: model.id, page, scope }, binding) }]);
 			}
 			if (pageCount > 1) {
 				const nav: Array<{ text: string; callback_data: string }> = [];
-				if (page > 0) nav.push({ text: "‹", callback_data: nativeControlRegistry.issue({ kind: "model-page", page: page - 1 }, binding) });
-				if (page + 1 < pageCount) nav.push({ text: "›", callback_data: nativeControlRegistry.issue({ kind: "model-page", page: page + 1 }, binding) });
+				if (page > 0) nav.push({ text: "‹", callback_data: nativeControlRegistry.issue({ kind: "model-page", page: page - 1, scope }, binding) });
+				if (page + 1 < pageCount) nav.push({ text: "›", callback_data: nativeControlRegistry.issue({ kind: "model-page", page: page + 1, scope }, binding) });
 				buttons.push(nav);
+			}
+			if (hasScopedModels) {
+				const targetScope = scope === "scoped" ? "all" : "scoped";
+				buttons.push([{ text: scope === "scoped" ? "查看全部模型" : "返回常用模型", callback_data: nativeControlRegistry.issue({ kind: "model-scope", scope: targetScope }, binding) }]);
 			}
 		} else {
 			const levels = getSupportedThinkingLevels(ctx);
@@ -2036,24 +2053,30 @@ export default function (pi: ExtensionAPI) {
 			await durableQueue!.complete([updateId]);
 			return;
 		}
+		const actionPage = action.kind === "model" || action.kind === "model-page" ? action.page : 0;
+		const actionScope = action.kind === "model" || action.kind === "model-page" || action.kind === "model-scope" ? action.scope : undefined;
 		try {
-			if (action.kind !== "model-page" && isPiBusyForSettings(ctx)) {
+			if ((action.kind === "model" || action.kind === "thinking") && isPiBusyForSettings(ctx)) {
 				await answer("Pi is busy; no setting was changed.");
-				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, menuKind, action.kind === "model" ? action.page ?? 0 : 0, message.message_id);
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, menuKind, actionPage, message.message_id, actionScope);
 				await durableQueue!.complete([updateId]);
 				return;
 			}
 			if (action.kind === "model-page") {
 				await answer();
-				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "model", action.page, message.message_id);
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "model", action.page, message.message_id, action.scope);
+			} else if (action.kind === "model-scope") {
+				await answer();
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "model", 0, message.message_id, action.scope);
 			} else if (action.kind === "model") {
 				nativeControlInProgress = true;
-				const model = (await getConfiguredModels(ctx)).find(item => item.provider === action.provider && item.id === action.modelId);
-				if (!model) throw new Error("That model is no longer configured.");
+				const scope = resolveNativeModelScope(ctx, action.scope);
+				const model = (await getNativeMenuModels(ctx, scope)).find(item => item.provider === action.provider && item.id === action.modelId);
+				if (!model) throw new Error("That model is no longer in the current menu.");
 				if (!ctx.isIdle() || activeTelegramTurn || dispatchedTelegramTurn || queuedTelegramTurns.length) throw new Error("Pi became busy; no setting was changed.");
 				if (!await pi.setModel(model)) throw new Error("Model switch was rejected (check provider authorization).");
 				await answer(`Model: ${model.provider}/${model.id}`);
-				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "model", action.page ?? 0, message.message_id);
+				await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, "model", action.page, message.message_id, action.scope);
 			} else {
 				nativeControlInProgress = true;
 				if (!getSupportedThinkingLevels(ctx).includes(action.level)) throw new Error("That thinking level is not supported by the current model.");
@@ -2064,7 +2087,7 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			await answer(detail.slice(0, 200));
-			await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, menuKind, action.kind === "model" ? action.page ?? 0 : 0, message.message_id).catch(() => undefined);
+			await renderNativeMenuWithMessage(message.chat.id, currentCwd, ctx, menuKind, actionPage, message.message_id, actionScope).catch(() => undefined);
 		} finally {
 			nativeControlInProgress = false;
 		}

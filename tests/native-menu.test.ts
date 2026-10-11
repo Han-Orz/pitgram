@@ -40,6 +40,7 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 	const modelOne = models[0];
 	const modelTwo = models[1];
 	let activeModel: any = modelOne;
+	let scopedModels: any[] = [modelOne, modelTwo].map(model => ({ model }));
 	let thinking = "medium";
 	let idle = true;
 	let setModelResult = true;
@@ -82,6 +83,7 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 	const ctx: any = {
 		mode: "tui", cwd: process.cwd(), isIdle: () => idle, abort() {},
 		get model() { return activeModel; },
+		get scopedModels() { return scopedModels; },
 		modelRegistry: {
 			getAll: () => models, getAvailable: () => models,
 			find: (provider: string, id: string) => models.find(m => m.provider === provider && m.id === id),
@@ -122,6 +124,9 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 
 		let selected = findButton("fixture/two");
 		const modelMenuMessageId = selected.menuMessageId;
+		assert.equal([...calls].reverse().find(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId)?.body.text, "Select common model (1/1)");
+		assert.throws(() => findButton("fixture/three", modelMenuMessageId), /button fixture\/three should be present/);
+		assert.ok(findButton("查看全部模型", modelMenuMessageId).button, "scoped models offer an all-models view");
 		click(selected.button, selected.menuMessageId);
 		await eventually(() => activeModel === modelTwo && calls.some(call => call.method === "answerCallbackQuery" && call.body.text?.startsWith("Model:")));
 		assert.equal(sentPrompts.length, 0, "control callbacks never submit a prompt");
@@ -136,6 +141,24 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 		await eventually(() => calls.some(call => call.method === "answerCallbackQuery" && call.body.callback_query_id === `native-${updateId}`));
 		assert.equal(modelSetCalls, setsBeforeReject, "a callback from another bot is rejected");
 
+		selected = findButton("查看全部模型", modelMenuMessageId);
+		click(selected.button, selected.menuMessageId);
+		await eventually(() => calls.some(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId && call.body.text === "Select model (1/2)"));
+		assert.ok(findButton("返回常用模型", modelMenuMessageId).button, "the all-models view can return to the common scope");
+		selected = findButton("返回常用模型", modelMenuMessageId);
+		let editsBeforeReturnToCommon = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		click(selected.button, selected.menuMessageId);
+		await eventually(() => {
+			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
+			return edits.length > editsBeforeReturnToCommon && edits.at(-1)?.body.text === "Select common model (1/1)";
+		});
+		selected = findButton("查看全部模型", modelMenuMessageId);
+		const editsBeforeReopeningAll = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		click(selected.button, selected.menuMessageId);
+		await eventually(() => {
+			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
+			return edits.length > editsBeforeReopeningAll && edits.at(-1)?.body.text === "Select model (1/2)";
+		});
 		selected = findButton("›", modelMenuMessageId);
 		click(selected.button, selected.menuMessageId);
 		await eventually(() => calls.some(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId && call.body.text === "Select model (2/2)"));
@@ -164,16 +187,60 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 		await eventually(() => thinking === "high" && calls.some(call => call.method === "answerCallbackQuery" && call.body.text === "Thinking: high"));
 		assert.equal(sentPrompts.length, 0);
 
-		selected = findButton("‹", modelMenuMessageId);
-		const beforePreviousPage = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		scopedModels = [{ model: models[9] }];
+		const editsBeforeScopeRefresh = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		updateId++;
+		enqueue({ update_id: updateId, message: {
+			message_id: 102, date: 1700000003, chat: { id: 42, type: "private" },
+			from: { id: 42, is_bot: false, first_name: "Fixture" }, text: "/model",
+		} });
+		await eventually(() => {
+			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
+			return edits.length > editsBeforeScopeRefresh && edits.at(-1)?.body.text === "Select common model (1/1)";
+		});
+		assert.ok(findButton("✓ fixture/ten", modelMenuMessageId).button, "a fresh menu reads the current live model scope");
+		assert.throws(() => findButton("fixture/one", modelMenuMessageId), /button fixture\/one should be present/);
+		selected = findButton("查看全部模型", modelMenuMessageId);
+		let editsBeforeScopeToggle = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
 		click(selected.button, selected.menuMessageId);
-		await eventually(() => calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length > beforePreviousPage
-			&& [...calls].reverse().find(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId)?.body.text === "Select model (1/2)");
+		await eventually(() => {
+			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
+			return edits.length > editsBeforeScopeToggle && edits.at(-1)?.body.text === "Select model (1/2)";
+		});
+		selected = findButton("›", modelMenuMessageId);
+		editsBeforeScopeToggle = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		click(selected.button, selected.menuMessageId);
+		await eventually(() => {
+			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
+			return edits.length > editsBeforeScopeToggle && edits.at(-1)?.body.text === "Select model (2/2)";
+		});
+		selected = findButton("‹", modelMenuMessageId);
+		editsBeforeScopeToggle = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		click(selected.button, selected.menuMessageId);
+		await eventually(() => {
+			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
+			return edits.length > editsBeforeScopeToggle && edits.at(-1)?.body.text === "Select model (1/2)";
+		});
 		selected = findButton("fixture/one", modelMenuMessageId);
 		setModelResult = false;
 		click(selected.button, selected.menuMessageId);
 		await eventually(() => calls.some(call => call.method === "answerCallbackQuery" && /switch was rejected/.test(call.body.text ?? "")));
 		assert.equal(activeModel, models[9], "failed model switches leave the active model unchanged");
+
+		scopedModels = [];
+		const editsBeforeUnscopedMenu = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		updateId++;
+		enqueue({ update_id: updateId, message: {
+			message_id: 103, date: 1700000004, chat: { id: 42, type: "private" },
+			from: { id: 42, is_bot: false, first_name: "Fixture" }, text: "/model",
+		} });
+		await eventually(() => {
+			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
+			return edits.length > editsBeforeUnscopedMenu && edits.at(-1)?.body.text === "Select model (1/2)";
+		});
+		assert.ok(findButton("fixture/one", modelMenuMessageId).button, "an unscoped session defaults to all available models");
+		assert.throws(() => findButton("查看全部模型", modelMenuMessageId), /button 查看全部模型 should be present/);
+		assert.throws(() => findButton("返回常用模型", modelMenuMessageId), /button 返回常用模型 should be present/);
 	} finally {
 		await handlers.get("session_shutdown")({}, ctx);
 		globalThis.fetch = originalFetch;

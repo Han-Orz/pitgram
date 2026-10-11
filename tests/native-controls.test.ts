@@ -6,9 +6,9 @@ const binding = { botId: 17, userId: 42, chatId: 42, messageId: 501, originCwd: 
 
 test("native control references are bound, single-use, and short-lived", () => {
 	const registry = new NativeControlRegistry();
-	const reference = registry.issue({ kind: "model", provider: "fixture", modelId: "m1" }, binding, 1000);
+	const reference = registry.issue({ kind: "model", provider: "fixture", modelId: "m1", page: 0, scope: "all" }, binding, 1000);
 	assert.match(reference, /^pc:[a-f0-9]{32}$/);
-	assert.deepEqual(registry.consume(reference, binding, 1001), { kind: "model", provider: "fixture", modelId: "m1" });
+	assert.deepEqual(registry.consume(reference, binding, 1001), { kind: "model", provider: "fixture", modelId: "m1", page: 0, scope: "all" });
 	assert.equal(registry.consume(reference, binding, 1002), undefined, "replay is rejected");
 
 	for (const altered of [

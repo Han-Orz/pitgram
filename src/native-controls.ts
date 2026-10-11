@@ -2,10 +2,13 @@ import { randomUUID } from "node:crypto";
 
 export const NATIVE_CONTROL_TTL_MS = 10 * 60 * 1000;
 
+export type NativeModelMenuScope = "scoped" | "all";
+
 export type NativeControlAction =
-	| { kind: "model"; provider: string; modelId: string; page?: number }
+	| { kind: "model"; provider: string; modelId: string; page: number; scope: NativeModelMenuScope }
 	| { kind: "thinking"; level: string }
-	| { kind: "model-page"; page: number };
+	| { kind: "model-page"; page: number; scope: NativeModelMenuScope }
+	| { kind: "model-scope"; scope: NativeModelMenuScope };
 
 interface NativeControlGrant {
 	action: NativeControlAction;

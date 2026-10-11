@@ -1,15 +1,21 @@
 export declare const NATIVE_CONTROL_TTL_MS: number;
+export type NativeModelMenuScope = "scoped" | "all";
 export type NativeControlAction = {
     kind: "model";
     provider: string;
     modelId: string;
-    page?: number;
+    page: number;
+    scope: NativeModelMenuScope;
 } | {
     kind: "thinking";
     level: string;
 } | {
     kind: "model-page";
     page: number;
+    scope: NativeModelMenuScope;
+} | {
+    kind: "model-scope";
+    scope: NativeModelMenuScope;
 };
 export interface NativeControlBinding {
     botId: number;
