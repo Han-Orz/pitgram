@@ -1719,14 +1719,21 @@ export default function (pi) {
             return;
         originCwd = await realpath(originCwd);
         const key = `${chatId}:${kind}`;
-        const existingId = nativeMenuMessages.get(key);
-        if (existingId !== undefined) {
-            await renderNativeMenuWithMessage(chatId, originCwd, ctx, kind, 0, existingId);
-            return;
+        try {
+            // Commands always open a fresh menu. Only callbacks edit an existing menu.
+            const sent = await callTelegram("sendMessage", { chat_id: chatId, text: "Loading controls…" });
+            const existingId = nativeMenuMessages.get(key);
+            if (existingId !== undefined) {
+                const botId = config.botId ?? Number(config.botToken.split(":", 1)[0]);
+                nativeControlRegistry.invalidateMessage({ botId, userId: config.allowedUserId, chatId, messageId: existingId, originCwd });
+            }
+            nativeMenuMessages.set(key, sent.message_id);
+            await renderNativeMenuWithMessage(chatId, originCwd, ctx, kind, 0, sent.message_id);
         }
-        const sent = await callTelegram("sendMessage", { chat_id: chatId, text: "Loading controls…" });
-        nativeMenuMessages.set(key, sent.message_id);
-        await renderNativeMenuWithMessage(chatId, originCwd, ctx, kind, 0, sent.message_id);
+        catch {
+            // Do not expose API errors (which may contain credentials), or fail silently.
+            await callTelegram("sendMessage", { chat_id: chatId, text: `Could not open /${kind} controls. Please try again.` });
+        }
     }
     async function renderNativeMenuWithMessage(chatId, originCwd, ctx, kind, page, messageId, requestedScope) {
         if (!nativeControlRegistry || !config.botToken || config.allowedUserId === undefined)

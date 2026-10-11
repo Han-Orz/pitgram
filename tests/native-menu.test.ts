@@ -47,6 +47,8 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 	let modelSetCalls = 0;
 	let updateId = 1;
 	let messageId = 500;
+	let failNextMenuEdit = false;
+	const deletedMessages = new Set<number>();
 	let incoming: any[] = [{ update_id: updateId, message: {
 		message_id: 100, date: 1700000000, chat: { id: 42, type: "private" },
 		from: { id: 42, is_bot: false, first_name: "Fixture" }, text: "/model",
@@ -62,6 +64,10 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 		const method = url.split("/").pop()!;
 		const body = init?.body ? JSON.parse(String(init.body)) : {};
 		calls.push({ method, body });
+		if (method === "editMessageText" && (deletedMessages.has(body.message_id) || failNextMenuEdit)) {
+			failNextMenuEdit = false;
+			return { ok: true, json: async () => ({ ok: false, description: "Bad Request: message to edit not found" }) } as Response;
+		}
 		let result: any = true;
 		if (method === "getUpdates") {
 			if (incoming.length) result = incoming.splice(0);
@@ -123,7 +129,7 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 		};
 
 		let selected = findButton("fixture/two");
-		const modelMenuMessageId = selected.menuMessageId;
+		let modelMenuMessageId = selected.menuMessageId;
 		assert.equal([...calls].reverse().find(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId)?.body.text, "Select common model (1/1)");
 		assert.throws(() => findButton("fixture/three", modelMenuMessageId), /button fixture\/three should be present/);
 		assert.ok(findButton("查看全部模型", modelMenuMessageId).button, "scoped models offer an all-models view");
@@ -188,16 +194,20 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 		assert.equal(sentPrompts.length, 0);
 
 		scopedModels = [{ model: models[9] }];
-		const editsBeforeScopeRefresh = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		const oldModelMenuMessageId = modelMenuMessageId;
+		const oldModelButton = findButton("fixture/nine", oldModelMenuMessageId).button;
 		updateId++;
 		enqueue({ update_id: updateId, message: {
 			message_id: 102, date: 1700000003, chat: { id: 42, type: "private" },
 			from: { id: 42, is_bot: false, first_name: "Fixture" }, text: "/model",
 		} });
-		await eventually(() => {
-			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
-			return edits.length > editsBeforeScopeRefresh && edits.at(-1)?.body.text === "Select common model (1/1)";
-		});
+		await eventually(() => calls.some(call => call.method === "editMessageText"
+			&& call.body.message_id > oldModelMenuMessageId && call.body.text === "Select common model (1/1)"));
+		modelMenuMessageId = findButton("✓ fixture/ten").menuMessageId;
+		assert.notEqual(modelMenuMessageId, oldModelMenuMessageId, "reopening sends a fresh menu at the bottom");
+		click(oldModelButton, oldModelMenuMessageId);
+		await eventually(() => calls.some(call => call.method === "answerCallbackQuery"
+			&& call.body.callback_query_id === `native-${updateId}` && /expired/.test(call.body.text ?? "")));
 		assert.ok(findButton("✓ fixture/ten", modelMenuMessageId).button, "a fresh menu reads the current live model scope");
 		assert.throws(() => findButton("fixture/one", modelMenuMessageId), /button fixture\/one should be present/);
 		selected = findButton("查看全部模型", modelMenuMessageId);
@@ -228,19 +238,43 @@ test("direct /model and /thinking menus change Pi settings without submitting pr
 		assert.equal(activeModel, models[9], "failed model switches leave the active model unchanged");
 
 		scopedModels = [];
-		const editsBeforeUnscopedMenu = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId).length;
+		const previousModelMenuMessageId = modelMenuMessageId;
 		updateId++;
 		enqueue({ update_id: updateId, message: {
 			message_id: 103, date: 1700000004, chat: { id: 42, type: "private" },
 			from: { id: 42, is_bot: false, first_name: "Fixture" }, text: "/model",
 		} });
-		await eventually(() => {
-			const edits = calls.filter(call => call.method === "editMessageText" && call.body.message_id === modelMenuMessageId);
-			return edits.length > editsBeforeUnscopedMenu && edits.at(-1)?.body.text === "Select model (1/2)";
-		});
+		await eventually(() => calls.some(call => call.method === "editMessageText"
+			&& call.body.message_id > previousModelMenuMessageId && call.body.text === "Select model (1/2)"));
+		modelMenuMessageId = findButton("fixture/one").menuMessageId;
 		assert.ok(findButton("fixture/one", modelMenuMessageId).button, "an unscoped session defaults to all available models");
 		assert.throws(() => findButton("查看全部模型", modelMenuMessageId), /button 查看全部模型 should be present/);
 		assert.throws(() => findButton("返回常用模型", modelMenuMessageId), /button 返回常用模型 should be present/);
+
+		const oldThinkingMenu = [...calls].reverse().find(call => call.method === "editMessageText"
+			&& call.body.text?.startsWith("Select thinking level"))!.body.message_id;
+		const callsBeforeReopen = calls.length;
+		deletedMessages.add(oldThinkingMenu);
+		const sendCommand = (text: string) => {
+			updateId++;
+			enqueue({ update_id: updateId, message: { message_id: 1000 + updateId,
+				date: 1700000005, chat: { id: 42, type: "private" },
+				from: { id: 42, is_bot: false, first_name: "Fixture" }, text } });
+		};
+		sendCommand("/thinking");
+		await eventually(() => calls.some(call => call.method === "editMessageText"
+			&& call.body.message_id > oldThinkingMenu && call.body.text?.startsWith("Select thinking level")));
+		assert.ok(!calls.slice(callsBeforeReopen).some(call => call.method === "editMessageText"
+			&& deletedMessages.has(call.body.message_id)), "reopening does not depend on deleted menus");
+		failNextMenuEdit = true;
+		sendCommand("/model");
+		await eventually(() => calls.some(call => call.method === "sendMessage"
+			&& call.body.text === "Could not open /model controls. Please try again."));
+		const failedMenuId = messageId;
+		sendCommand("/model");
+		await eventually(() => calls.some(call => call.method === "editMessageText"
+			&& call.body.message_id > failedMenuId && call.body.text === "Select model (1/2)"));
+		assert.equal(sentPrompts.length, 0, "reopening and errors do not invoke the Agent");
 	} finally {
 		await handlers.get("session_shutdown")({}, ctx);
 		globalThis.fetch = originalFetch;
