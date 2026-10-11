@@ -58,7 +58,8 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "@tgcloud/cli": "^0.1.2"
+    "@tgcloud/cli": "^0.1.2",
+    "marked": "^15.0.12"
   },
   "engines": {
     "node": ">=22.19.0"

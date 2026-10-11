@@ -6,7 +6,7 @@ Pitgram is derived from Mario Zechner's original [`badlogic/pi-telegram`](https:
 
 ## Features
 
-- **Telegram bridge:** Send prompts to Pi and receive streamed replies.
+- **Telegram bridge:** Send prompts to Pi and receive streamed replies, with final assistant Markdown rendered using Telegram-supported formatting.
 - **Attachments:** Receive Telegram media and return local files with `pitgram_attach`.
 - **Remote sessions:** List, switch, create, and fork Pi sessions.
 - **Model controls:** Inspect or change the model and thinking level.
@@ -25,6 +25,8 @@ For source development:
 ```bash
 pi -e /path/to/pitgram
 ```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the fork's Windows and Debian development, update, and Pi package-loading workflow.
 
 ## Direct-mode setup
 

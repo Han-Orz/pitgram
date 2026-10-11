@@ -1,5 +1,11 @@
 # Changelog
 
+## Fork changes (unreleased)
+
+- Preserve the existing Windows fsync guard, deferred-session replay handling, and `/thinking max` support as a separate fork commit.
+- Render final assistant Markdown as Telegram-supported HTML, retain plain-text streaming previews, edit an existing preview in place, and split long replies without breaking tags or Unicode.
+- Add targeted Markdown conversion and long-message tests; use `marked` as the lightweight Markdown parser.
+
 ## 1.6.0
 
 - Add direct-mode notification status/send channels on Pi's shared extension event bus, scoped to the connected bot, paired private chat, and canonical active workspace.

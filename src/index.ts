@@ -12,6 +12,7 @@ import { ExtensionRunner, SessionManager, type SessionInfo } from "@earendil-wor
 import { Type } from "typebox";
 import { DurableQueue } from "./durable-queue.js";
 import { NotificationTransport, type NotificationTarget, type NotificationTargetResult, type NotificationUnavailableReason } from "./notifications.js";
+import { renderTelegramMarkdown } from "./telegram-markdown.js";
 
 let activeRunner: any | undefined;
 
@@ -1014,6 +1015,62 @@ export default function (pi: ExtensionAPI) {
 			lastMessageId = sent.message_id;
 		}
 		return lastMessageId;
+	}
+
+	async function sendAssistantReply(chatId: number, text: string): Promise<void> {
+		if (previewState?.flushTimer) {
+			clearTimeout(previewState.flushTimer);
+			previewState.flushTimer = undefined;
+		}
+		await previewFlushPromise?.catch(() => undefined);
+		const preview = previewState;
+		const editMessageId = preview?.mode === "message" ? preview.messageId : undefined;
+		if (preview?.mode === "draft") await clearPreview(chatId);
+		else previewState = undefined;
+
+		let chunks: Array<{ html: string; text: string }>;
+		let useHtml = true;
+		try {
+			chunks = renderTelegramMarkdown(text);
+		} catch {
+			useHtml = false;
+			chunks = chunkParagraphs(text).map(chunk => ({ html: chunk, text: chunk }));
+		}
+
+		for (let index = 0; index < chunks.length; index++) {
+			const chunk = chunks[index];
+			const existingMessageId = index === 0 ? editMessageId : undefined;
+			const deliver = async (body: string, formatted: boolean): Promise<void> => {
+				if (existingMessageId !== undefined) {
+					await callTelegram("editMessageText", {
+						chat_id: chatId,
+						message_id: existingMessageId,
+						text: body,
+						...(formatted ? { parse_mode: "HTML" } : {}),
+					});
+				} else {
+					await callTelegram<TelegramSentMessage>("sendMessage", {
+						chat_id: chatId,
+						text: body,
+						...(formatted ? { parse_mode: "HTML" } : {}),
+					});
+				}
+			};
+			try {
+				await deliver(useHtml ? chunk.html : chunk.text, useHtml);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (/message is not modified/i.test(message)) continue;
+				if (!useHtml || !/can't parse entities|can't find end of the entity|unsupported (?:start|end) tag|tag is not allowed|entity .* is not closed/i.test(message)) {
+					throw error;
+				}
+				try { await deliver(chunk.text, false); }
+				catch (fallbackError) {
+					const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+					if (!/message is not modified/i.test(fallbackMessage)) throw fallbackError;
+				}
+			}
+		}
 	}
 
 	async function sendQueuedAttachments(turn: ActiveTelegramTurn): Promise<void> {
@@ -2570,16 +2627,11 @@ export default function (pi: ExtensionAPI) {
 				previewState.pendingText = finalText ?? previewState.pendingText;
 			}
 
-			if (finalText && finalText.length <= MAX_MESSAGE_LENGTH) {
-				const finalized = await finalizePreview(turn.chatId);
-				if (!finalized && turn.queuedAttachments.length > 0 && !finalText) {
-					await sendTextReply(turn.chatId, turn.replyToMessageId, "Attached requested file(s).");
-				}
+			if (finalText) {
+				await sendAssistantReply(turn.chatId, finalText);
 			} else {
 				await clearPreview(turn.chatId);
-				if (finalText) {
-					await sendTextReply(turn.chatId, turn.replyToMessageId, finalText);
-				} else if (turn.queuedAttachments.length > 0) {
+				if (turn.queuedAttachments.length > 0) {
 					await sendTextReply(turn.chatId, turn.replyToMessageId, "Attached requested file(s).");
 				}
 			}
