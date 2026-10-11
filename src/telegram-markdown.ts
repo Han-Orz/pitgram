@@ -38,17 +38,6 @@ function makeRenderer(): Renderer {
 	renderer.paragraph = function ({ tokens }: Tokens.Paragraph): string {
 		return `${this.parser.parseInline(tokens)}\n\n`;
 	};
-	renderer.strong = function ({ tokens }: Tokens.Strong): string {
-		return `<b>${this.parser.parseInline(tokens)}</b>`;
-	};
-	renderer.em = function ({ tokens }: Tokens.Em): string {
-		return `<i>${this.parser.parseInline(tokens)}</i>`;
-	};
-	renderer.del = function ({ tokens }: Tokens.Del): string {
-		return `<s>${this.parser.parseInline(tokens)}</s>`;
-	};
-	renderer.codespan = ({ text }: Tokens.Codespan): string => `<code>${escapeHtml(text)}</code>`;
-	renderer.code = ({ text }: Tokens.Code): string => `<pre><code>${escapeHtml(text.replace(/\n+$/, ""))}</code></pre>\n`;
 	renderer.br = (): string => "\n";
 	renderer.html = ({ text }: Tokens.HTML | Tokens.Tag): string => escapeHtml(text);
 	// Markdown text is always escaped, including entity-looking input, so only
@@ -67,10 +56,6 @@ function makeRenderer(): Renderer {
 		const label = tokens.length ? this.parser.parseInline(tokens) : escapeHtml(text);
 		const safe = safeHref(href);
 		return safe ? `<a href="${escapeHtml(safe)}">${label || "Image"}</a>` : label || "Image";
-	};
-	renderer.blockquote = function ({ tokens }: Tokens.Blockquote): string {
-		const body = this.parser.parse(tokens).trim();
-		return body ? `<blockquote>${body}</blockquote>\n` : "";
 	};
 	renderer.list = function (token: Tokens.List): string {
 		const depth = listDepth++;
@@ -118,37 +103,10 @@ function makeRenderer(): Renderer {
 }
 
 function decodeEntity(entity: string): string {
-	const body = entity.slice(1, -1);
-	if (body.startsWith("#x") || body.startsWith("#X")) {
-		const value = Number.parseInt(body.slice(2), 16);
-		return Number.isFinite(value) && value <= 0x10ffff ? String.fromCodePoint(value) : entity;
-	}
-	if (body.startsWith("#")) {
-		const value = Number.parseInt(body.slice(1), 10);
-		return Number.isFinite(value) && value <= 0x10ffff ? String.fromCodePoint(value) : entity;
-	}
-	const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'" };
-	return named[body] ?? entity;
+	return ({ "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" })[entity.toLowerCase()] ?? entity;
 }
 
-function tagAt(html: string, offset: number): { raw: string; name: string; closing: boolean; selfClosing: boolean } | undefined {
-	if (html[offset] !== "<") return undefined;
-	let quote: string | undefined;
-	for (let end = offset + 1; end < html.length; end++) {
-		const character = html[end];
-		if (quote) {
-			if (character === quote) quote = undefined;
-		} else if (character === '"' || character === "'") {
-			quote = character;
-		} else if (character === ">") {
-			const raw = html.slice(offset, end + 1);
-			const match = /^<\s*(\/?)\s*([a-z][a-z0-9]*)(?:\s[^<>]*?)?\s*(\/?)>$/i.exec(raw);
-			if (!match) return undefined;
-			return { raw, name: match[2].toLowerCase(), closing: match[1] === "/", selfClosing: match[3] === "/" };
-		}
-	}
-	return undefined;
-}
+const HTML_TOKEN = /<\/?[a-z][a-z0-9]*(?:\s[^<>]*?)?\s*\/?>|&(?:amp|lt|gt|quot|#39);|[\s\S]/giu;
 
 /** Split renderer-produced Telegram HTML without cutting entities or leaving tags unbalanced. */
 export function chunkTelegramHtml(html: string, maxLength = MAX_TELEGRAM_TEXT_LENGTH): TelegramChunk[] {
@@ -168,45 +126,21 @@ export function chunkTelegramHtml(html: string, maxLength = MAX_TELEGRAM_TEXT_LE
 		visibleLength = 0;
 	};
 
-	for (let offset = 0; offset < html.length;) {
-		const tag = tagAt(html, offset);
-		if (tag) {
-			currentHtml += tag.raw;
-			if (!tag.selfClosing && tag.name !== "br") {
-				if (tag.closing) {
-					for (let index = stack.length - 1; index >= 0; index--) {
-						if (stack[index].name === tag.name) {
-							stack.splice(index, 1);
-						break;
-						}
-					}
-				} else {
-					stack.push({ name: tag.name, opening: tag.raw, closing: `</${tag.name}>` });
+	for (const [raw] of html.matchAll(HTML_TOKEN)) {
+		if (raw.startsWith("<")) {
+			const name = /^<\/?([a-z][a-z0-9]*)/i.exec(raw)![1].toLowerCase();
+			const closing = raw.startsWith("</");
+			currentHtml += raw;
+			if (name !== "br" && !raw.endsWith("/>")) {
+				if (closing) stack.pop();
+				else {
+					stack.push({ name, opening: raw, closing: `</${name}>` });
 				}
 			}
-			offset += tag.raw.length;
 			continue;
 		}
 
-		let visible: string;
-		let raw: string;
-		if (html[offset] === "&") {
-			const match = /^&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);/i.exec(html.slice(offset));
-			if (match) {
-				raw = match[0];
-				visible = decodeEntity(raw);
-				offset += raw.length;
-			} else {
-				raw = visible = "&";
-				offset++;
-			}
-		} else {
-			const point = html.codePointAt(offset)!;
-			visible = String.fromCodePoint(point);
-			raw = visible;
-			offset += visible.length;
-		}
-
+		const visible = raw.startsWith("&") ? decodeEntity(raw) : raw;
 		if (visibleLength + visible.length > maxLength) flush();
 		currentHtml += raw;
 		currentText += visible;

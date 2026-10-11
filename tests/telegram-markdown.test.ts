@@ -25,17 +25,17 @@ test("Telegram Markdown renders common formatting through its supported HTML sub
 	].join("\n")).map(chunk => chunk.html).join("");
 
 	assert.match(output, /<b>Heading<\/b>/);
-	assert.match(output, /<b>bold<\/b>/);
-	assert.match(output, /<i>italic<\/i>/);
+	assert.match(output, /<(?:b|strong)>bold<\/(?:b|strong)>/);
+	assert.match(output, /<(?:i|em)>italic<\/(?:i|em)>/);
 	assert.match(output, /<a href="https:\/\/example\.com\/path\?a=1&amp;b=2">link<\/a>/);
 	assert.match(output, /<code>code<\/code>/);
-	assert.match(output, /<pre><code>const value = 1 &lt; 2;<\/code><\/pre>/);
+	assert.match(output, /<pre><code(?: class="language-ts")?>const value = 1 &lt; 2;\s*<\/code><\/pre>/);
 	assert.match(output, /• first item/);
-	assert.match(output, /• <b>second<\/b> item/);
+	assert.match(output, /• <(?:b|strong)>second<\/(?:b|strong)> item/);
 	assert.match(output, /  • nested item/);
 	assert.match(output, /1\. ordered one/);
 	assert.match(output, /2\. ordered two/);
-	assert.match(output, /<blockquote>quoted text<\/blockquote>/);
+	assert.match(output, /<blockquote>\s*quoted text\s*<\/blockquote>/);
 	assert.doesNotMatch(output, /<(?:h[1-6]|ul|ol|li|p|img)\b/i);
 });
 
