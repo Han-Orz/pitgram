@@ -2,6 +2,8 @@
 
 ## Fork changes (unreleased)
 
+- Accept native absolute workspace paths for direct notifications on Windows and Unix; retain canonical workspace and paired-target checks, with native-path and relative-path regression tests.
+- Handle Pi custom-message start events without assuming they carry a user prompt.
 - Preserve the existing Windows fsync guard, deferred-session replay handling, and `/thinking max` support as a separate fork commit.
 - Render final assistant Markdown as Telegram-supported HTML, retain plain-text streaming previews, edit an existing preview in place, and split long replies without breaking tags or Unicode.
 - Add targeted Markdown conversion and long-message tests; use `marked` as the lightweight Markdown parser.

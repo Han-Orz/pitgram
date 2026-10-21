@@ -2748,13 +2748,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
+		const prompt = "prompt" in event ? event.prompt : "";
 		// Match the actual dispatched prompt, never the [telegram] prefix alone.
 		// A queued turn must not be assigned to an unrelated local agent run.
 		matchedTelegramTurn = dispatchedTelegramTurn === queuedTelegramTurns[0]
 			&& dispatchedTelegramTurn?.content[0]?.type === "text"
-			&& event.prompt === dispatchedTelegramTurn.content[0].text
+			&& prompt === dispatchedTelegramTurn.content[0].text
 			? dispatchedTelegramTurn : undefined;
-		const suffix = isTelegramPrompt(event.prompt)
+		const suffix = isTelegramPrompt(prompt)
 			? `${SYSTEM_PROMPT_SUFFIX}\n- The current user message came from Telegram.`
 			: SYSTEM_PROMPT_SUFFIX;
 		return {

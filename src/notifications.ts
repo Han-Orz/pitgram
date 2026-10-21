@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 export interface NotificationTarget {
 	botId: string;
 	chatId: number;
@@ -69,7 +71,7 @@ function isTarget(value: unknown): value is NotificationTarget {
 		&& Number.isSafeInteger(value.chatId) && (value.chatId as number) > 0
 		&& Number.isSafeInteger(value.userId) && (value.userId as number) > 0
 		&& value.chatId === value.userId
-		&& typeof value.originCwd === "string" && value.originCwd.startsWith("/");
+		&& typeof value.originCwd === "string" && isAbsolute(value.originCwd);
 }
 
 function sameTarget(left: NotificationTarget, right: NotificationTarget): boolean {
@@ -100,7 +102,7 @@ export class NotificationTransport {
 	get inFlightCount(): number { return this.tasks.size; }
 
 	async sendForWorkspace(originCwd: string, text: string, context?: unknown): Promise<NotificationSendResult> {
-		if (typeof originCwd !== "string" || !originCwd.startsWith("/")
+		if (typeof originCwd !== "string" || !isAbsolute(originCwd)
 			|| typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_LENGTH) {
 			return { status: "not_sent", reason: "invalid_request" };
 		}
@@ -149,7 +151,7 @@ export class NotificationTransport {
 		if (!isRecord(data) || !isReply(data.reply)) return;
 		const reply = data.reply;
 		if (Object.keys(data).sort().join(",") !== "originCwd,reply"
-			|| typeof data.originCwd !== "string" || !data.originCwd.startsWith("/")) {
+			|| typeof data.originCwd !== "string" || !isAbsolute(data.originCwd)) {
 			replyOnce(reply, { status: "unavailable", reason: "invalid_request" });
 			return;
 		}

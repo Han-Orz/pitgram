@@ -77,6 +77,29 @@ test("chunkParagraphs splits large text blocks cleanly", () => {
 	assert.equal(chunks[1], paragraph2);
 });
 
+test("before_agent_start handles custom messages without a user prompt", async () => {
+	const { default: pitgramExtension } = await import("../dist/index.js");
+	const handlers = new Map<string, any>();
+	pitgramExtension({
+		on: (name: string, handler: any) => handlers.set(name, handler),
+		registerTool: () => {},
+		registerCommand: () => {},
+	} as any);
+	const beforeStart = handlers.get("before_agent_start");
+	const custom = await beforeStart({
+		messageType: "custom", systemPrompt: "Base prompt",
+		message: { customType: "mail-status", content: "[telegram] not a user prompt" },
+	});
+	assert.equal(custom.systemPrompt.startsWith("Base prompt"), true);
+	assert.equal(custom.systemPrompt.includes("The current user message came from Telegram."), false);
+	for (const event of [
+		{ prompt: "[telegram] user prompt", systemPrompt: "" },
+		{ messageType: "user", prompt: "[telegram] user prompt", systemPrompt: "" },
+	]) {
+		assert.equal((await beforeStart(event)).systemPrompt.includes("The current user message came from Telegram."), true);
+	}
+});
+
 test("pitgram-connect and pitgram-disconnect commands emit terminal notifications", async () => {
 	const pitgramExtensionModule = await import("../dist/index.js");
 	const pitgramExtension = pitgramExtensionModule.default;

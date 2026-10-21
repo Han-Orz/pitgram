@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 export const NOTIFICATION_STATUS_CHANNEL = "pitgram:notifications:status";
 export const NOTIFICATION_SEND_CHANNEL = "pitgram:notifications:send";
 export const NOTIFICATION_TIMEOUT_MS = 15_000;
@@ -17,7 +18,7 @@ function isTarget(value) {
         && Number.isSafeInteger(value.chatId) && value.chatId > 0
         && Number.isSafeInteger(value.userId) && value.userId > 0
         && value.chatId === value.userId
-        && typeof value.originCwd === "string" && value.originCwd.startsWith("/");
+        && typeof value.originCwd === "string" && isAbsolute(value.originCwd);
 }
 function sameTarget(left, right) {
     return left.botId === right.botId && left.chatId === right.chatId
@@ -49,7 +50,7 @@ export class NotificationTransport {
     }
     get inFlightCount() { return this.tasks.size; }
     async sendForWorkspace(originCwd, text, context) {
-        if (typeof originCwd !== "string" || !originCwd.startsWith("/")
+        if (typeof originCwd !== "string" || !isAbsolute(originCwd)
             || typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_LENGTH) {
             return { status: "not_sent", reason: "invalid_request" };
         }
@@ -102,7 +103,7 @@ export class NotificationTransport {
             return;
         const reply = data.reply;
         if (Object.keys(data).sort().join(",") !== "originCwd,reply"
-            || typeof data.originCwd !== "string" || !data.originCwd.startsWith("/")) {
+            || typeof data.originCwd !== "string" || !isAbsolute(data.originCwd)) {
             replyOnce(reply, { status: "unavailable", reason: "invalid_request" });
             return;
         }

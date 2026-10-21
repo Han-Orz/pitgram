@@ -59,6 +59,72 @@ test("direct notification transport reports a scoped target and sends independen
 	await transport.close();
 });
 
+const absoluteWorkspaces = process.platform === "win32"
+	? [String.raw`D:\Pi\workspace`, "D:/Pi/workspace", String.raw`\\server\share\workspace`, String.raw`D:\邮件 监控\workspace`]
+	: ["/workspace/project", "/workspace/邮件 监控"];
+
+for (const originCwd of absoluteWorkspaces) {
+	test(`notification status, event sends and tool sends accept native absolute workspace ${originCwd}`, async () => {
+		const fixture = bus();
+		const scopedTarget = { ...target, originCwd };
+		const sends: Array<{ target: NotificationTarget; text: string }> = [];
+		const context = {};
+		const transport = new NotificationTransport(fixture.events, {
+			resolveTarget: async cwd => cwd === originCwd
+				? { status: "ready", target: scopedTarget }
+				: { status: "unavailable", reason: "wrong_workspace" },
+			send: async (sendTarget, text) => {
+				sends.push({ target: sendTarget, text });
+				return { status: "sent", messageId: 501 };
+			},
+		});
+		try {
+			assert.deepEqual(await request(fixture.emit.bind(null, NOTIFICATION_STATUS_CHANNEL), { originCwd }),
+				{ status: "ready", target: scopedTarget });
+			assert.deepEqual(await request(fixture.emit.bind(null, NOTIFICATION_SEND_CHANNEL), {
+				target: scopedTarget, text: "event notification",
+			}), { status: "sent", messageId: 501 });
+			assert.deepEqual(await transport.sendForWorkspace(originCwd, "tool notification", context),
+				{ status: "sent", messageId: 501 });
+			assert.deepEqual(sends, [
+				{ target: scopedTarget, text: "event notification" },
+				{ target: scopedTarget, text: "tool notification" },
+			]);
+			assert.deepEqual(await request(fixture.emit.bind(null, NOTIFICATION_SEND_CHANNEL), {
+				target: { ...scopedTarget, originCwd: `${originCwd}/other` }, text: "wrong workspace",
+			}), { status: "not_sent", reason: "target_unavailable" });
+			assert.equal(sends.length, 2);
+		} finally {
+			await transport.close();
+		}
+	});
+}
+
+test("all notification entry points reject relative workspace paths before resolving or sending", async () => {
+	const fixture = bus();
+	let resolutions = 0;
+	let sends = 0;
+	const transport = new NotificationTransport(fixture.events, {
+		resolveTarget: async cwd => { resolutions++; return resultFor(cwd); },
+		send: async () => { sends++; return { status: "sent", messageId: 1 }; },
+	});
+	try {
+		for (const originCwd of ["", ".", "workspace/project", "../project", "D:workspace", "./D:/workspace"]) {
+			assert.deepEqual(await request(fixture.emit.bind(null, NOTIFICATION_STATUS_CHANNEL), { originCwd }),
+				{ status: "unavailable", reason: "invalid_request" });
+			assert.deepEqual(await request(fixture.emit.bind(null, NOTIFICATION_SEND_CHANNEL), {
+				target: { ...target, originCwd }, text: "event notification",
+			}), { status: "not_sent", reason: "invalid_request" });
+			assert.deepEqual(await transport.sendForWorkspace(originCwd, "tool notification"),
+				{ status: "not_sent", reason: "invalid_request" });
+		}
+		assert.equal(resolutions, 0);
+		assert.equal(sends, 0);
+	} finally {
+		await transport.close();
+	}
+});
+
 test("status reports relay, workspace, pairing and bot ownership as unavailable", async () => {
 	const fixture = bus();
 	let availability: NotificationTargetResult = { status: "unavailable", reason: "relay_mode" };
